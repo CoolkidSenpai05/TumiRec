@@ -1,0 +1,15 @@
+# Standalone defaults; component files are documented presets, not implicit merges.
+seed: 42
+data:
+  n_users: 500
+  n_items: 300
+  events_per_user: 20
+  cold_fraction: 0.1
+sampler:
+  max_history: 1000
+  recent_window: 50
+  p_stale: 0.0
+  lag_seconds: [0, 3600, 86400]
+evaluation:
+  ks: [10, 20, 50]
+  protocol: full_catalog

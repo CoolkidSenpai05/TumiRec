@@ -1,0 +1,4 @@
+# Reserved defaults for later milestones; no model implemented in M1.
+n_layers: 8
+d_model: 384
+n_heads: 6

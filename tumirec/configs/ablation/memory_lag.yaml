@@ -1,0 +1,3 @@
+# Sampler settings only; memory encoder is deferred to M4.
+p_stale: 0.5
+lag_seconds: [0, 3600, 86400]

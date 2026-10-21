@@ -1,0 +1,5 @@
+n_users: 500
+n_items: 300
+events_per_user: 20
+seed: 42
+cold_fraction: 0.1

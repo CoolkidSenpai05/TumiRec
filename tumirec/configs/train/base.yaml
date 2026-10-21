@@ -1,0 +1,4 @@
+# Reserved training settings for later milestones.
+seed: 42
+precision: bf16
+gradient_checkpointing: false

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tumirec"
+version = "0.1.0"
+description = "TUMI-Rec research prototype"
+requires-python = ">=3.10"
+dependencies = ["torch>=2", "numpy", "pandas", "pyarrow", "omegaconf", "pytest", "tqdm"]
+
+[project.optional-dependencies]
+text = ["sentence-transformers"]
+
+[tool.setuptools.packages.find]
+include = ["tumirec*"]
+
+[tool.setuptools.package-data]
+tumirec = ["configs/**/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tumirec/tests"]
+pythonpath = ["."]
