@@ -1,6 +1,6 @@
 # TUMI-Rec
 
-A research prototype for unified search and recommendation. Milestones M1 and M2
+A research prototype for unified search and recommendation. Milestones M1–M3
 are implemented. See SPEC.md for the architecture and PROGRESS.md for status.
 
 ## Run locally
@@ -37,7 +37,8 @@ example = test[0]
 presets; they are not automatically merged. Data and sampler keys map to their
 function/constructor arguments (cold_fraction belongs to temporal_split).
 Model/train presets reserve defaults for later milestones and do not run training.
-Model and serving packages remain reserved for M3–M6. S1 is implemented in M2.
+M3 implements item tokens and a causal baseline. Unified modeling and serving
+remain reserved for M4–M6. S1 is implemented in M2.
 
 ## Design decisions
 
@@ -80,8 +81,7 @@ Model and serving packages remain reserved for M3–M6. S1 is implemented in M2.
   relevant set; NDCG's ideal ranking contains min(k, relevant count) items.
   Full-catalog ranking is the intended protocol; the metric function accepts
   ranked lists and cannot verify candidate generation or full-catalog coverage.
-- Real-data loaders, recommendation models, S2–S5 training and evaluation
-  result aggregation remain deferred beyond M2.
+- Unified modeling, S2–S5 training and H2–H5 studies remain deferred beyond M3.
   No datasets/models have been downloaded, and no experimental results claimed.
 
 
@@ -139,6 +139,97 @@ Model and serving packages remain reserved for M3–M6. S1 is implemented in M2.
   does not depend on worker iteration order. Mid-epoch resume is not supported.
   The S1 checkpoint contains both adapter and RQ weights and their configuration;
   use frozen adapter outputs with RQ-VAE when assigning subsequent item codes.
+
+### M3 token and H1 decisions
+
+- Item tokens sum one embedding per SID level, including the collision suffix by
+  default (`include_collision_suffix: false` removes that level). Each level has
+  its own table sized from the supplied SID catalog. The deterministic integer
+  hash is `((item_id mod 2147483647) * 48271 mod 2147483647) mod hash_buckets`.
+  Hash collisions share parameters. Python's process-dependent hash is not used.
+- Warm-item modes are: `sid_only = SID`, `id_only = ID`, `fixed_sum = SID + ID`,
+  and gated modes use `SID + sigmoid(MLP(stats)) * ID`. Gate statistics are
+  log1p(train count), normalized train age and train popularity percentile.
+  All modes fall back to SID for count-zero items; ID lookup can be absent
+  entirely for an all-cold batch. Thus the `id_only` control is ID-only on warm
+  items with an explicit SID cold fallback, not a pure-ID cold baseline.
+- Only `gated` applies ID dropout; `gated_no_id_dropout`, `id_only` and `fixed_sum`
+  are controls without it. Default dropout is
+  `p_min + (p_max - p_min) / (1 + count / scale)`; an exponential alternative
+  replaces the reciprocal with `exp(-count / scale)`. Whole ID vectors are
+  independently masked per occurrence, without inverted-dropout rescaling.
+  Evaluation never drops IDs. Global Torch seeds control these draws.
+- This is a SASRec-style control, not a reproduction of a published SASRec
+  benchmark recipe. It uses two pre-norm causal transformer blocks by default,
+  learned positions, SDPA attention, a shared item-token scoring tower and a
+  learned start token. It predicts each target from up to 50 strictly earlier
+  TRAIN events, including a start-only context for empty histories. Right-padding
+  is masked as an attention key. This does not implement the M5 unified backbone.
+- Training uses exact softmax over TRAIN-observed catalog items. Cold items are
+  excluded even as negatives so their dedicated codes are not fitted using
+  withheld items. SID levels can share weights with warm items; codes never seen
+  in training retain their initialization. Frozen S1 assignments are shared by
+  all H1 modes within each seed; each seed independently fits S1 on the same split.
+- Validation NDCG@10 selects an epoch for each run; ties select the earlier epoch.
+  Test is evaluated only after selection. All modes use equal training budgets,
+  architecture, hash sizes, SIDs and split. Hyperparameters are configurable but
+  no systematic tuning or real-data baseline comparison has been performed.
+  Do not interpret synthetic results as evidence for H1 or claim state-of-the-art.
+- Full-catalog evaluation retains consumed items (repeated next items are valid),
+  includes cold items, and breaks score ties by ascending item ID. Histories for
+  validation/test remain frozen TRAIN-only; validation events do not enter test
+  context. The supplied catalog is a static snapshot, not time-filtered per query;
+  use snapshot-appropriate metadata to avoid future-item availability leakage.
+- Popularity slices use average tied percentile ranks among train-observed items:
+  head > 0.8, torso > 0.5 and <= 0.8, tail <= 0.5. Cold means train count zero;
+  `heldout_cold` is the explicitly held-out subset. Cold users have fewer than five
+  train events. Task/domain slices describe labels only: this rec baseline does
+  not consume query text, source context, task tokens or domain adapters.
+  Every slice reports target/item counts; empty slices have null metrics. Summary
+  means and population std (ddof=0) use nonempty seeds and state their count.
+- Per-user splitting is not a single global time cutoff. Training statistics and
+  S1 codes are fitted at the train-partition level, not re-fit before each target.
+  Strict event-time histories do not eliminate those broader protocol limits.
+- MovieLens ratings >= 4 become implicit positives, using all movies.dat items as
+  the catalog. Amazon uses only items present in positive reviews from the chosen
+  category. Metadata gaps become empty fields; duplicate reviews remain separate
+  events. The 2018 and 2023 JSONL schemas are explicit options, with milliseconds
+  converted to seconds only for 2023. No synthetic search queries are generated.
+- H1 checkpoints preserve optimizer/scheduler, Torch RNG and validation-best
+  weights for exact epoch-boundary resume. Input/config fingerprints reject a
+  changed resume. Use a fresh output directory for changed configurations. The
+  implementation is intended for ML-1M/a small category, with full-catalog logits
+  per batch; larger catalogs require a separate scalable retrieval protocol.
+
+## Run M3 / H1
+
+Run all five modes and three seeds on tiny synthetic data, without downloads:
+
+```sh
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m tumirec.scripts.run_ablation --dataset synthetic --output results/h1-synthetic
+```
+
+In this workspace prepend the `LD_LIBRARY_PATH` setting below. Synthetic features
+are seeded random test features, not text embeddings. Outputs include per-seed S1
+artifacts, per-mode checkpoints/training.csv/results.json, data_manifest.json,
+items.parquet and aggregate summary.json/summary.csv. Add `--resume` to continue;
+use `--seeds 42` or `--modes gated sid_only` for explicitly smaller runs.
+
+After manually obtaining local data and encoder weights:
+
+```sh
+python -m tumirec.scripts.run_ablation --dataset movielens --data-dir artifacts/ml-1m --encoder-model artifacts/bge-small-en-v1.5 --config tumirec/configs/ablation/h1.yaml --device cuda --output results/h1-ml1m
+python -m tumirec.scripts.run_ablation --dataset amazon --reviews artifacts/category.jsonl.gz --metadata artifacts/meta-category.jsonl.gz --amazon-schema 2018 --encoder-model artifacts/bge-small-en-v1.5 --config tumirec/configs/ablation/h1.yaml --device cuda --output results/h1-amazon
+```
+
+The runner accepts only H1 in M3. YAML config sections are `baseline` and
+`tokenizer`, consumed through OmegaConf; data/split/seeds/modes are CLI options.
+Config values override corresponding defaults, including a device if specified.
+Real text encoding requires sentence-transformers and local weights. See
+`tumirec/scripts/download_data.md` and `download_encoder.md` for local schemas and
+manual preparation. Full real datasets, real encoder inference and CUDA execution
+have not been tested in this workspace; local schema fixtures and CPU synthetic
+pipelines are covered by tests.
 
 ## Run M2 locally
 

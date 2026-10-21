@@ -1,0 +1,28 @@
+# Runner defaults: five modes, seeds 42/43/44, cold fraction 0.1, split seed 42.
+# Same training budget and validation-selection rule for every mode.
+baseline:
+  d_model: 128
+  n_heads: 4
+  n_layers: 2
+  max_history: 50
+  dropout: 0.1
+  hash_buckets: 10000
+  dropout_min: 0.0
+  dropout_max: 0.8
+  dropout_scale: 10.0
+  dropout_function: inverse
+  include_collision_suffix: true
+  epochs: 10
+  batch_size: 128
+  learning_rate: 0.001
+  warmup_steps: 100
+  gradient_clip: 1.0
+  bf16: true
+  gradient_checkpointing: false
+tokenizer:
+  adapter_dim: 128
+  adapter_epochs: 5
+  rq_epochs: 20
+  n_levels: 3
+  codebook_size: 256
+  latent_dim: 128
