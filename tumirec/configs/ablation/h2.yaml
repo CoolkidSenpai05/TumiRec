@@ -1,0 +1,27 @@
+# Separate M4 runner: python -m tumirec.scripts.run_h2
+# Modes/seeds/eval lags are CLI flags; defaults are four modes, three seeds,
+# and fixed evaluation lags 0/3600/86400 seconds.
+baseline:
+  d_model: 128
+  n_heads: 4
+  n_layers: 2
+  max_history: 50
+  epochs: 10
+  bf16: true
+  gradient_checkpointing: false
+memory:
+  n_latents: 8
+  n_actions: 3
+  max_history: 1000
+  time_buckets: 32
+  time_unit_seconds: 1
+  session_segmentation: false
+  session_gap_seconds: 1800
+  dropout: 0.0
+lag:
+  p_stale: 0.5
+  choices: [0, 3600, 86400]
+  weights: [1, 1, 1]
+tokenizer:
+  adapter_epochs: 5
+  rq_epochs: 20

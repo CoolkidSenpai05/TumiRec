@@ -1,6 +1,6 @@
 # TUMI-Rec
 
-A research prototype for unified search and recommendation. Milestones M1–M3
+A research prototype for unified search and recommendation. Milestones M1–M4
 are implemented. See SPEC.md for the architecture and PROGRESS.md for status.
 
 ## Run locally
@@ -37,8 +37,8 @@ example = test[0]
 presets; they are not automatically merged. Data and sampler keys map to their
 function/constructor arguments (cold_fraction belongs to temporal_split).
 Model/train presets reserve defaults for later milestones and do not run training.
-M3 implements item tokens and a causal baseline. Unified modeling and serving
-remain reserved for M4–M6. S1 is implemented in M2.
+M3 implements item tokens and a causal baseline; M4 adds interest memory and H2.
+Unified modeling and later training remain reserved for M5–M6. S1 is implemented in M2.
 
 ## Design decisions
 
@@ -81,7 +81,7 @@ remain reserved for M4–M6. S1 is implemented in M2.
   relevant set; NDCG's ideal ranking contains min(k, relevant count) items.
   Full-catalog ranking is the intended protocol; the metric function accepts
   ranked lists and cannot verify candidate generation or full-catalog coverage.
-- Unified modeling, S2–S5 training and H2–H5 studies remain deferred beyond M3.
+- Unified modeling, S2–S5 training and H3–H5 studies remain deferred beyond M4.
   No datasets/models have been downloaded, and no experimental results claimed.
 
 
@@ -200,6 +200,112 @@ remain reserved for M4–M6. S1 is implemented in M2.
   changed resume. Use a fresh output directory for changed configurations. The
   implementation is intended for ML-1M/a small category, with full-catalog logits
   per batch; larger catalogs require a separate scalable retrieval protocol.
+
+### M4 memory and H2 decisions
+
+- `InterestMemory` receives item embeddings plus action and logarithmic time-delta
+  embeddings, with `K=8`, two latent-to-history cross-attention blocks and one
+  latent self-attention block by default. All attention uses PyTorch SDPA. It
+  returns `(B,K,D)`; missing history and `none`/`no_memory` return exact zeros.
+  Padding and future events are masked before embeddings/pooling. Unix-second
+  timestamps and action indices are int64; lag is nonnegative integer seconds.
+- The exclusive memory cutoff is `target_time - lag`. The encoder independently
+  enforces this even if an upstream dataset passed extra events, orders eligible
+  events by time and retains the newest 1000 by default. Tied-cutoff events are
+  excluded. Time buckets are `floor(log2(1 + (cutoff-event_time)/unit_seconds))`,
+  capped to the configured vocabulary. They are relative to the snapshot cutoff,
+  not the current online request time, so cached tokens stay well-defined.
+- Optional session segmentation mean-pools consecutive eligible events before
+  cross-attention, splitting where the time gap is strictly greater than the
+  configured threshold. It runs after time filtering/windowing. Content pooling
+  adds a projected mean of frozen content vectors from that same eligible history
+  to each latent before final normalization. Content inputs are detached; only
+  the projection is trained. No generated text or user summaries are used.
+- `MemoryDataset` supplies both current recent TRAIN history and lagged long TRAIN
+  history. Lag draws depend on seed/epoch/target index, independently of access
+  order. `p_stale` enables a draw from configured nonnegative choices with optional
+  weights (uniform by default). Fixed evaluation lag overrides random draws.
+  Recent online history is never truncated by memory lag. Memory/recent overlap
+  is allowed. Set the dataset epoch before creating loader workers.
+- H2 uses a separate M4 side-branch experiment on the unmodified M3 baseline.
+  The online context is recent SASRec state plus a bias-free projection of the
+  mean memory latent, followed by the existing item-dot-product scoring. This is
+  a controlled memory experiment, not the M5 unified backbone or S3 training.
+- To distinguish the H2 controls, all modes retain the same online recent window:
+  `none` disables the memory branch, `recent_only` compresses only the newest
+  recent-window events before the memory cutoff, `behavior_memory` compresses
+  up to the long-history limit, and `behavior_memory+content_pool` adds frozen
+  content pooling. Thus `none` is the M3 recent-history baseline; `recent_only`
+  tests whether compressing an equally short window helps before adding length.
+  The strictest staleness setting can erase memory while recent context remains.
+- H2 fits S1 once per seed and shares its SID table across all four modes. It
+  co-trains memory and the causal baseline under random training lag, selects one
+  checkpoint using fresh (lag-zero) validation NDCG@10, and evaluates those exact
+  weights at all fixed lags. There is no per-lag test-based selection/retraining.
+  Training uses train-observed item softmax; evaluation ranks the full catalog,
+  retains consumed items and uses ascending item IDs for score ties. Popularity
+  and cold slices retain the M3 definitions. Summary mean/std uses population std
+  with nonempty-seed counts; empty per-run slices have null metrics.
+- The cache stores detached `(K,D)` memory values keyed by user and caller-supplied
+  version; it does not cache projected backbone attention K/V (M5 does not exist
+  yet). A version must identify weights, catalog and memory/pooling settings.
+  Values carry an exclusive event cutoff. A request never receives a future
+  snapshot; misses return zeros and queue refresh. Snapshots older than TTL may
+  be returned as previous memory while refresh is queued. TTL is measured in
+  event-time cutoff seconds; equality is still fresh. Older out-of-order refresh
+  writes are rejected. Storage is LRU-bounded; refresh is explicit and synchronous
+  in the simulation, with no worker/thread or shared-service concurrency support.
+- Cache reuse must keep the model in eval and honor version/cutoff provenance.
+  The cache cannot inspect a caller's history to verify that a published snapshot
+  was built safely. `refresh_batch` uses the same guarded encoder; training never
+  consumes cached detached tokens, so encoder gradients remain intact.
+- Optional cache profiling measures actual cached/uncached batch forwards after
+  warmup, synchronizing CUDA when used. It verifies equal scores at equal cutoffs
+  through the cache API. Timings exclude loading, transfer, cache lookup and
+  nearline refresh; they are not production latency measurements. The smoke uses
+  few samples solely to validate instrumentation. General unified-backbone and
+  candidate-count microbenchmarks remain M6. A profiler scope marks the encoder.
+- H2 has a separate `run_h2.py` entry point to preserve the completed M3
+  `run_ablation.py` without modifying earlier milestone code. YAML sections are
+  `baseline`, `memory`, `lag`, and `tokenizer`; modes, seeds and fixed lags are CLI
+  flags. Epoch-boundary resume checks training config/input fingerprints and
+  preserves optimizer/scheduler/RNG and validation-best weights. Cache profiles
+  are measured again on resume and need not be numerically reproducible.
+- All M3 leakage/protocol limits still apply: per-user rather than global temporal
+  splits, static train-partition statistics/SIDs, and snapshot-dependent catalog
+  content. Memory controls are not independently tuned, and active parameter
+  counts differ. Synthetic content is random test input. Do not infer H2 quality
+  or latency superiority from synthetic smoke results.
+
+## Run M4 / H2
+
+Run four variants, three seeds and lags `{0,3600,86400}` seconds without downloads:
+
+```sh
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m tumirec.scripts.run_h2 --dataset synthetic --output results/h2-synthetic --profile-repeats 5
+```
+
+Prepend the workspace `LD_LIBRARY_PATH` setting below when needed. The synthetic
+preset has 40 hourly events per user, a five-event recent window and 32-event long
+window so even one-day staleness can retain older events. It uses four latent
+queries for speed. Full defaults are K=8, recent=50 and long=1000.
+
+Outputs include per-seed S1 artifacts, per-mode checkpoints/training.csv/results.json,
+three lag evaluations per result, optional measured cache timings, catalog/data
+manifest, and aggregate summary.json/summary.csv. Use `--resume` with identical
+inputs/config, `--seeds 42` for one seed, or `--eval-lags 0 3600 86400` to choose
+explicit evaluation conditions. `--profile-repeats 0` disables timing.
+
+The local-data path uses the same loaders and offline content cache as H1:
+
+```sh
+python -m tumirec.scripts.run_h2 --dataset movielens --data-dir artifacts/ml-1m --encoder-model artifacts/bge-small-en-v1.5 --config tumirec/configs/ablation/h2.yaml --device cuda --output results/h2-ml1m
+python -m tumirec.scripts.run_h2 --dataset amazon --reviews artifacts/category.jsonl.gz --metadata artifacts/meta-category.jsonl.gz --amazon-schema 2018 --encoder-model artifacts/bge-small-en-v1.5 --config tumirec/configs/ablation/h2.yaml --device cuda --output results/h2-amazon
+```
+
+No real dataset, encoder or GPU experiment was run for M4. No download or dependency
+installation occurs automatically. Local-data paths require the dependencies and
+weights described under M2/M3; CLI synthetic runs need neither text models nor YAML.
 
 ## Run M3 / H1
 
